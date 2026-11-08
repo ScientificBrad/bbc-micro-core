@@ -1,0 +1,16 @@
+# Build and temporary files
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test results
+TestResults/
+.pytest_cache/
+__pycache__/
+
+# OS files
+.DS_Store
+Thumbs.db

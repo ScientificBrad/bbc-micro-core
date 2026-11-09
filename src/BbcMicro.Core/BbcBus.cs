@@ -13,22 +13,36 @@ namespace BbcMicro.Core
         public int SelectedSlot = 15; // Defaults to Slot 15 (BASIC)
 
         public readonly SystemVia6522 SystemVia;
+        public readonly Sn76489 Sound = new();
         public readonly UserVia6522 UserVia;
         public readonly Crtc6845 Crtc = new();
         public readonly VideoUla Ula = new();
         public readonly KeyboardMatrix Keyboard = new();
+        public readonly Intel8271 Fdc;
+        public TubeUla? Tube { get; set; }
 
         public readonly StringBuilder VduOutput = new();
         public Action<char>? OnCharacterWritten;
 
-        public bool IrqPending => SystemVia.IrqActive || UserVia.IrqActive;
-        public bool NmiPending { get; set; }
+        public bool IrqPending => SystemVia.IrqActive || UserVia.IrqActive || (Tube != null && Tube.HostIrq);
+        private bool _nmiPending;
+        public bool NmiPending
+        {
+            get => _nmiPending || (Tube != null && Tube.HostNmi);
+            set => _nmiPending = value;
+        }
 
-        public void ClearNmi() => NmiPending = false;
+        public void ClearNmi()
+        {
+            _nmiPending = false;
+            Tube?.ClearHostNmi();
+        }
 
         public BbcBus(byte[]? mosRom = null, byte[]? basicRom = null, byte[]? dfsRom = null)
         {
+            Fdc = new Intel8271(this);
             SystemVia = new SystemVia6522(Keyboard);
+            SystemVia.SoundWrite = Sound.Write;
             UserVia = new UserVia6522();
 
             for (int i = 0; i < 16; i++)
@@ -62,10 +76,12 @@ namespace BbcMicro.Core
             Array.Clear(Ram, 0, Ram.Length);
             SelectedSlot = 15;
             SystemVia.Reset();
+            Sound.Reset();
             UserVia.Reset();
             Crtc.Reset();
             Ula.Reset();
             Keyboard.Reset();
+            Fdc.Reset();
             VduOutput.Clear();
             NmiPending = false;
         }
@@ -73,8 +89,10 @@ namespace BbcMicro.Core
         public void Tick(int cycles)
         {
             SystemVia.Tick(cycles);
+            Sound.Tick(cycles);
             UserVia.Tick(cycles);
             Keyboard.Tick();
+            Fdc.Tick(cycles);
         }
 
         public byte Read(ushort address)
@@ -182,8 +200,7 @@ namespace BbcMicro.Core
             // Floppy Controller 8271 ($FE80-$FE9F)
             if (offset < 0xA0)
             {
-                // Status register ($FE80): 0 = ready / idle
-                return 0x00;
+                return Fdc.Read((byte)(offset - 0x80));
             }
             // Econet ($FEA0-$FEBF)
             if (offset < 0xC0)
@@ -196,7 +213,11 @@ namespace BbcMicro.Core
                 return 0x40; // Conversion complete flag
             }
             // Tube ULA ($FEE0-$FEFF)
-            return 0x00; // Tube not fitted
+            if (offset >= 0xE0)
+            {
+                return Tube != null ? Tube.HostRead((ushort)(0xFE00 + offset)) : (byte)0x00;
+            }
+            return 0x00;
         }
 
         private void WriteSheila(byte offset, byte value)
@@ -239,6 +260,18 @@ namespace BbcMicro.Core
             if (offset < 0x80)
             {
                 UserVia.Write(offset, value);
+                return;
+            }
+            // Floppy Controller 8271 ($FE80-$FE9F)
+            if (offset < 0xA0)
+            {
+                Fdc.Write((byte)(offset - 0x80), value);
+                return;
+            }
+            // Tube ULA ($FEE0-$FEFF)
+            if (offset >= 0xE0)
+            {
+                Tube?.HostWrite((ushort)(0xFE00 + offset), value);
                 return;
             }
         }

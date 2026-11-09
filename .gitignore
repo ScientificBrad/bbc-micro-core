@@ -1,16 +1,40 @@
-# Build and temporary files
-bin/
-obj/
+# Build and publish outputs
+**/[Bb]in/
+**/[Oo]bj/
+**/[Pp]ublish/
+publish/
+build_output/
+*.pdb
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
+.vs/
+.idea/
+.vscode/
 
 # Test results
 TestResults/
 .pytest_cache/
 __pycache__/
+*.pyc
+
+# Temporary BMP files
+*.bmp
+*.tmp
+
+# Proprietary disk images (Clean-Room Distribution)
+games/*.ssd
+games/*.dsd
+games/*.bin
+!games/README.md
+!games/MATRIX.BAS
+
+# Binary releases (Published to GitHub Releases, not in git history)
+releases/
+build_output/
 
 # OS files
 .DS_Store
 Thumbs.db
+[Dd]esktop.ini

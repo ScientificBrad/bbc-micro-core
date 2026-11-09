@@ -18,9 +18,12 @@ namespace BbcMicro.Core
         public ushort PC;
         public bool C, Z, I, D, B, V, N;
 
-        private readonly IMemoryBus _bus;
+        public readonly IMemoryBus _bus;
+        private bool _lastNmi = false;
+        private bool _nmiEdge = false;
         public long TotalCycles { get; private set; }
         public long InstructionsExecuted { get; private set; }
+        public bool Is65C02 { get; set; } = false;
 
         public byte Status
         {
@@ -58,6 +61,8 @@ namespace BbcMicro.Core
         {
             SP = 0xFF;
             Status = 0x24; // I set, bit 5 set
+            _lastNmi = false;
+            _nmiEdge = false;
             ushort lo = _bus.Read(0xFFFC);
             ushort hi = _bus.Read(0xFFFD);
             PC = (ushort)((hi << 8) | lo);
@@ -158,6 +163,23 @@ namespace BbcMicro.Core
             return addr;
         }
 
+        private ushort AddrIndirectZp()
+        {
+            byte ptr = ReadByte();
+            byte lo = _bus.Read(ptr);
+            byte hi = _bus.Read((byte)(ptr + 1));
+            return (ushort)((hi << 8) | lo);
+        }
+
+        private ushort AddrAbsoluteIndexedIndirect()
+        {
+            ushort baseAddr = ReadWord();
+            ushort addr = (ushort)(baseAddr + X);
+            byte lo = _bus.Read(addr);
+            byte hi = _bus.Read((ushort)(addr + 1));
+            return (ushort)((hi << 8) | lo);
+        }
+
         private void Branch(bool condition, ref int cycles)
         {
             sbyte offset = (sbyte)ReadByte();
@@ -238,9 +260,17 @@ namespace BbcMicro.Core
 
         public int Step()
         {
-            // Interrupt check
-            if (_bus.NmiPending)
+            // Edge-triggered NMI detection
+            bool currentNmi = _bus.NmiPending;
+            if (!_lastNmi && currentNmi)
             {
+                _nmiEdge = true;
+            }
+            _lastNmi = currentNmi;
+
+            if (_nmiEdge)
+            {
+                _nmiEdge = false;
                 _bus.ClearNmi();
                 PushWord(PC);
                 Push((byte)((Status & ~0x10) | 0x20));
@@ -278,6 +308,7 @@ namespace BbcMicro.Core
                 case 0xB9: A = _bus.Read(AddrAbsoluteY(out cross)); SetZN(A); cycles = cross ? 5 : 4; break;
                 case 0xA1: A = _bus.Read(AddrIndirectX()); SetZN(A); cycles = 6; break;
                 case 0xB1: A = _bus.Read(AddrIndirectY(out cross)); SetZN(A); cycles = cross ? 6 : 5; break;
+                case 0xB2: if (Is65C02) { A = _bus.Read(AddrIndirectZp()); SetZN(A); cycles = 5; } break;
 
                 // LDX
                 case 0xA2: X = ReadByte(); SetZN(X); cycles = 2; break;
@@ -301,6 +332,13 @@ namespace BbcMicro.Core
                 case 0x99: AddrAbsoluteY(out _); _bus.Write((ushort)(AddrAbsoluteYBase() + Y), A); cycles = 5; break;
                 case 0x81: _bus.Write(AddrIndirectX(), A); cycles = 6; break;
                 case 0x91: AddrIndirectY(out _); _bus.Write(AddrIndirectYTarget(), A); cycles = 6; break;
+                case 0x92: if (Is65C02) { _bus.Write(AddrIndirectZp(), A); cycles = 5; } break;
+
+                // STZ (65C02)
+                case 0x64: if (Is65C02) { _bus.Write(AddrZeroPage(), 0); cycles = 3; } break;
+                case 0x74: if (Is65C02) { _bus.Write(AddrZeroPageX(), 0); cycles = 4; } break;
+                case 0x9C: if (Is65C02) { _bus.Write(AddrAbsolute(), 0); cycles = 4; } break;
+                case 0x9E: if (Is65C02) { AddrAbsoluteX(out _); _bus.Write((ushort)(AddrAbsoluteXBase() + X), 0); cycles = 5; } break;
 
                 // STX
                 case 0x86: _bus.Write(AddrZeroPage(), X); cycles = 3; break;
@@ -321,6 +359,7 @@ namespace BbcMicro.Core
                 case 0x79: Adc(_bus.Read(AddrAbsoluteY(out cross))); cycles = cross ? 5 : 4; break;
                 case 0x61: Adc(_bus.Read(AddrIndirectX())); cycles = 6; break;
                 case 0x71: Adc(_bus.Read(AddrIndirectY(out cross))); cycles = cross ? 6 : 5; break;
+                case 0x72: if (Is65C02) { Adc(_bus.Read(AddrIndirectZp())); cycles = 5; } break;
 
                 // SBC
                 case 0xE9: Sbc(ReadByte()); cycles = 2; break;
@@ -331,6 +370,7 @@ namespace BbcMicro.Core
                 case 0xF9: Sbc(_bus.Read(AddrAbsoluteY(out cross))); cycles = cross ? 5 : 4; break;
                 case 0xE1: Sbc(_bus.Read(AddrIndirectX())); cycles = 6; break;
                 case 0xF1: Sbc(_bus.Read(AddrIndirectY(out cross))); cycles = cross ? 6 : 5; break;
+                case 0xF2: if (Is65C02) { Sbc(_bus.Read(AddrIndirectZp())); cycles = 5; } break;
 
                 // CMP
                 case 0xC9: Compare(A, ReadByte()); cycles = 2; break;
@@ -341,6 +381,7 @@ namespace BbcMicro.Core
                 case 0xD9: Compare(A, _bus.Read(AddrAbsoluteY(out cross))); cycles = cross ? 5 : 4; break;
                 case 0xC1: Compare(A, _bus.Read(AddrIndirectX())); cycles = 6; break;
                 case 0xD1: Compare(A, _bus.Read(AddrIndirectY(out cross))); cycles = cross ? 6 : 5; break;
+                case 0xD2: if (Is65C02) { Compare(A, _bus.Read(AddrIndirectZp())); cycles = 5; } break;
 
                 // CPX
                 case 0xE0: Compare(X, ReadByte()); cycles = 2; break;
@@ -361,6 +402,7 @@ namespace BbcMicro.Core
                 case 0x39: A &= _bus.Read(AddrAbsoluteY(out cross)); SetZN(A); cycles = cross ? 5 : 4; break;
                 case 0x21: A &= _bus.Read(AddrIndirectX()); SetZN(A); cycles = 6; break;
                 case 0x31: A &= _bus.Read(AddrIndirectY(out cross)); SetZN(A); cycles = cross ? 6 : 5; break;
+                case 0x32: if (Is65C02) { A &= _bus.Read(AddrIndirectZp()); SetZN(A); cycles = 5; } break;
 
                 // ORA
                 case 0x09: A |= ReadByte(); SetZN(A); cycles = 2; break;
@@ -371,6 +413,7 @@ namespace BbcMicro.Core
                 case 0x19: A |= _bus.Read(AddrAbsoluteY(out cross)); SetZN(A); cycles = cross ? 5 : 4; break;
                 case 0x01: A |= _bus.Read(AddrIndirectX()); SetZN(A); cycles = 6; break;
                 case 0x11: A |= _bus.Read(AddrIndirectY(out cross)); SetZN(A); cycles = cross ? 6 : 5; break;
+                case 0x12: if (Is65C02) { A |= _bus.Read(AddrIndirectZp()); SetZN(A); cycles = 5; } break;
 
                 // EOR
                 case 0x49: A ^= ReadByte(); SetZN(A); cycles = 2; break;
@@ -381,8 +424,16 @@ namespace BbcMicro.Core
                 case 0x59: A ^= _bus.Read(AddrAbsoluteY(out cross)); SetZN(A); cycles = cross ? 5 : 4; break;
                 case 0x41: A ^= _bus.Read(AddrIndirectX()); SetZN(A); cycles = 6; break;
                 case 0x51: A ^= _bus.Read(AddrIndirectY(out cross)); SetZN(A); cycles = cross ? 6 : 5; break;
+                case 0x52: if (Is65C02) { A ^= _bus.Read(AddrIndirectZp()); SetZN(A); cycles = 5; } break;
+
+                // TSB / TRB (65C02)
+                case 0x04: if (Is65C02) { addr = AddrZeroPage(); val = _bus.Read(addr); Z = (A & val) == 0; _bus.Write(addr, (byte)(val | A)); cycles = 5; } break;
+                case 0x0C: if (Is65C02) { addr = AddrAbsolute(); val = _bus.Read(addr); Z = (A & val) == 0; _bus.Write(addr, (byte)(val | A)); cycles = 6; } break;
+                case 0x14: if (Is65C02) { addr = AddrZeroPage(); val = _bus.Read(addr); Z = (A & val) == 0; _bus.Write(addr, (byte)(val & ~A)); cycles = 5; } break;
+                case 0x1C: if (Is65C02) { addr = AddrAbsolute(); val = _bus.Read(addr); Z = (A & val) == 0; _bus.Write(addr, (byte)(val & ~A)); cycles = 6; } break;
 
                 // BIT
+                case 0x89: if (Is65C02) { val = ReadByte(); Z = (A & val) == 0; cycles = 2; } break;
                 case 0x24:
                     val = _bus.Read(AddrZeroPage());
                     Z = (A & val) == 0;
@@ -390,12 +441,32 @@ namespace BbcMicro.Core
                     V = (val & 0x40) != 0;
                     cycles = 3;
                     break;
+                case 0x34:
+                    if (Is65C02)
+                    {
+                        val = _bus.Read(AddrZeroPageX());
+                        Z = (A & val) == 0;
+                        N = (val & 0x80) != 0;
+                        V = (val & 0x40) != 0;
+                        cycles = 4;
+                    }
+                    break;
                 case 0x2C:
                     val = _bus.Read(AddrAbsolute());
                     Z = (A & val) == 0;
                     N = (val & 0x80) != 0;
                     V = (val & 0x40) != 0;
                     cycles = 4;
+                    break;
+                case 0x3C:
+                    if (Is65C02)
+                    {
+                        val = _bus.Read(AddrAbsoluteX(out _));
+                        Z = (A & val) == 0;
+                        N = (val & 0x80) != 0;
+                        V = (val & 0x40) != 0;
+                        cycles = 4;
+                    }
                     break;
 
                 // INC / DEC memory
@@ -414,6 +485,8 @@ namespace BbcMicro.Core
                 case 0xC8: Y++; SetZN(Y); cycles = 2; break;
                 case 0xCA: X--; SetZN(X); cycles = 2; break;
                 case 0x88: Y--; SetZN(Y); cycles = 2; break;
+                case 0x1A: if (Is65C02) { A++; SetZN(A); cycles = 2; } break;
+                case 0x3A: if (Is65C02) { A--; SetZN(A); cycles = 2; } break;
 
                 // ASL
                 case 0x0A: C = (A & 0x80) != 0; A = (byte)(A << 1); SetZN(A); cycles = 2; break;
@@ -445,7 +518,22 @@ namespace BbcMicro.Core
 
                 // Jumps & Calls
                 case 0x4C: PC = AddrAbsolute(); cycles = 3; break;
-                case 0x6C: PC = ReadWordBug(ReadWord()); cycles = 5; break;
+                case 0x6C:
+                    ushort jmpTarget = ReadWord();
+                    if (Is65C02)
+                    {
+                        byte lo = _bus.Read(jmpTarget);
+                        byte hi = _bus.Read((ushort)(jmpTarget + 1));
+                        PC = (ushort)((hi << 8) | lo);
+                        cycles = 6;
+                    }
+                    else
+                    {
+                        PC = ReadWordBug(jmpTarget);
+                        cycles = 5;
+                    }
+                    break;
+                case 0x7C: if (Is65C02) { PC = AddrAbsoluteIndexedIndirect(); cycles = 6; } break;
                 case 0x20:
                     addr = AddrAbsolute();
                     PushWord((ushort)(PC - 1));
@@ -456,6 +544,7 @@ namespace BbcMicro.Core
                 case 0x40: Status = Pop(); PC = PopWord(); cycles = 6; break;
 
                 // Branches
+                case 0x80: if (Is65C02) { Branch(true, ref cycles); } break; // BRA (65C02)
                 case 0x90: Branch(!C, ref cycles); break;
                 case 0xB0: Branch(C, ref cycles); break;
                 case 0xF0: Branch(Z, ref cycles); break;
@@ -470,6 +559,10 @@ namespace BbcMicro.Core
                 case 0x08: Push((byte)(Status | 0x30)); cycles = 3; break; // PHP pushes B and bit 5 set
                 case 0x68: A = Pop(); SetZN(A); cycles = 4; break;
                 case 0x28: Status = Pop(); cycles = 4; break;
+                case 0xDA: if (Is65C02) { Push(X); cycles = 3; } break; // PHX (65C02)
+                case 0xFA: if (Is65C02) { X = Pop(); SetZN(X); cycles = 4; } break; // PLX (65C02)
+                case 0x5A: if (Is65C02) { Push(Y); cycles = 3; } break; // PHY (65C02)
+                case 0x7A: if (Is65C02) { Y = Pop(); SetZN(Y); cycles = 4; } break; // PLY (65C02)
                 case 0xBA: TSX(); cycles = 2; break;
                 case 0x9A: TXS(); cycles = 2; break;
 

@@ -40,6 +40,14 @@ namespace BbcMicro.Core
         public readonly BbcBus Bus;
         public readonly Cpu6502 Cpu;
 
+        public TubeUla? Tube { get; private set; }
+        public ParasiteBus? ParasiteBus { get; private set; }
+        public Cpu65C02? ParasiteCpu { get; private set; }
+        public bool TubeEnabled => Tube != null;
+
+        private long _parasiteCyclesTarget;
+        private long _parasiteCyclesExecuted;
+
         public readonly StringBuilder CapturedOutput = new();
         private readonly System.Collections.Generic.Queue<byte> _directInputQueue = new();
 
@@ -49,12 +57,32 @@ namespace BbcMicro.Core
             Cpu = new Cpu6502(Bus);
         }
 
+        public void EnableTube(byte[]? parasiteBootRom = null)
+        {
+            Tube = new TubeUla();
+            Bus.Tube = Tube;
+            ParasiteBus = new ParasiteBus(Tube, parasiteBootRom);
+            ParasiteCpu = new Cpu65C02(ParasiteBus);
+            Bus.Ram[0x0279] = 0xFF; // Tube presence flag
+            Bus.Ram[0x027A] = 0xFF; // OSBYTE &EA Tube flag ($0190 + &EA = $027A)
+        }
+
         public void Reset()
         {
             Bus.Reset();
             Cpu.Reset();
             CapturedOutput.Clear();
             _directInputQueue.Clear();
+            _parasiteCyclesTarget = 0;
+            _parasiteCyclesExecuted = 0;
+            if (Tube != null)
+            {
+                Tube.Reset();
+                ParasiteBus?.Reset();
+                ParasiteCpu?.Reset();
+                Bus.Ram[0x0279] = 0xFF;
+                Bus.Ram[0x027A] = 0xFF;
+            }
         }
 
         public bool InjectKeyboardChar(byte c)
@@ -92,7 +120,31 @@ namespace BbcMicro.Core
                 Bus.OnCharacterWritten?.Invoke(c);
             }
 
-            Cpu.Step();
+            if (TubeEnabled && CapturedOutput.ToString().Contains(">"))
+            {
+                // Ensure Tube presence flag is set for OSBYTE &EA ($0190 + &EA = $027A)
+                Bus.Ram[0x027A] = 0xFF;
+                Bus.Ram[0x0279] = 0xFF;
+            }
+
+            int hCycles = Cpu.Step();
+
+            if (TubeEnabled && ParasiteCpu != null && Tube != null)
+            {
+                _parasiteCyclesTarget += (long)hCycles * 3;
+                if (!Tube.ParasiteInReset)
+                {
+                    while (_parasiteCyclesExecuted * 2 < _parasiteCyclesTarget)
+                    {
+                        int pCycles = ParasiteCpu.Step();
+                        _parasiteCyclesExecuted += pCycles;
+                    }
+                }
+                else
+                {
+                    _parasiteCyclesExecuted = _parasiteCyclesTarget / 2;
+                }
+            }
         }
 
         public void RunCycles(long targetCycles)

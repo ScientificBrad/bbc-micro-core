@@ -21,6 +21,9 @@ namespace BbcMicro.Core
         public byte Ier;   // Reg 14
 
         private readonly KeyboardMatrix _keyboard;
+        private byte _addressableLatch = 0xFF;
+        public Action<byte>? SoundWrite;
+        public byte AddressableLatch => _addressableLatch;
         private int _vsyncCycleCounter;
 
         public bool IrqActive => (Ifr & 0x7F & Ier) != 0;
@@ -47,6 +50,7 @@ namespace BbcMicro.Core
             Ifr = 0;
             Ier = 0;
             _vsyncCycleCounter = 0;
+            _addressableLatch = 0xFF;
         }
 
         public void Tick(int cycles)
@@ -77,6 +81,13 @@ namespace BbcMicro.Core
             {
                 _vsyncCycleCounter -= 40000;
                 Ifr |= 0x02; // Bit 1: CA1 (Vertical Sync)
+            }
+
+            // Keyboard auto-scan (IC32 addressable latch output 3 = 1):
+            // Hardware counter scans columns continuously; if any key is held down, assert CA2
+            if ((_addressableLatch & 0x08) != 0 && _keyboard.HasAnyKeyDown())
+            {
+                Ifr |= 0x01; // Bit 0: CA2 (Keyboard interrupt)
             }
 
             // Update IFR bit 7 (active IRQ)
@@ -161,6 +172,17 @@ namespace BbcMicro.Core
             {
                 case 0: // Port B
                     Orb = val;
+                    // IC32 74LS259 latch: PB0-2 select output, PB3 sets its value.
+                    // Output 0 is the active-low SN76489 write-enable signal.
+                    int index = val & 7;
+                    int mask = 1 << index;
+                    bool wasHigh = (_addressableLatch & mask) != 0;
+                    bool nowHigh = (val & 8) != 0;
+                    _addressableLatch = nowHigh
+                        ? (byte)(_addressableLatch | mask)
+                        : (byte)(_addressableLatch & ~mask);
+                    if (index == 0 && wasHigh && !nowHigh)
+                        SoundWrite?.Invoke(Ora);
                     break;
 
                 case 1: // Port A with handshake
@@ -240,6 +262,10 @@ namespace BbcMicro.Core
             if (_keyboard.HasKeyInColumn((byte)(val & 0x0F)))
             {
                 Ifr |= 0x01; // CA2 interrupt active
+            }
+            else
+            {
+                Ifr &= unchecked((byte)~0x01);
             }
         }
     }

@@ -65,6 +65,15 @@ namespace BbcMicro.Core
                 _keys[internalKey] = down;
         }
 
+        public bool HasAnyKeyDown()
+        {
+            for (int i = 0; i < 128; i++)
+            {
+                if (_keys[i]) return true;
+            }
+            return false;
+        }
+
         public bool HasKeyInColumn(byte col)
         {
             col &= 0x0F;

@@ -1,0 +1,66 @@
+name: BBC Micro Model B CI & Architecture Verification
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build-and-verify:
+    name: Build, Verify Architecture & Publish
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install reportlab pillow
+
+      - name: Disk Images Distribution Audit
+        shell: pwsh
+        run: |
+          Write-Host "Auditing Git tracked files for proprietary disk dumps..."
+          $prohibited = git ls-files | Where-Object { $_ -match '\.(ssd|dsd)$' }
+          if ($prohibited) {
+            Write-Error "PROHIBITED PROPRIETARY DISK DUMPS DETECTED IN GIT TRACKING:`n$prohibited"
+            exit 1
+          }
+          Write-Host "CLEAN AUDIT PASSED: No proprietary disk images (.ssd/.dsd) are tracked in Git." -ForegroundColor Green
+
+      - name: Build Solution
+        run: |
+          dotnet build BbcMicro.sln -c Release
+
+      - name: Run C# xUnit Test Suite
+        run: |
+          dotnet test tests/BbcMicro.Tests/BbcMicro.Tests.csproj -c Release --verbosity normal
+
+      - name: Publish Self-Contained Win-x64 Executable
+        run: |
+          dotnet publish src/BbcMicro.Emulator/BbcMicro.Emulator.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o build_output/
+
+      - name: Compile Technical Whitepaper PDF
+        run: |
+          python scripts/build_pdf_report.py
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bbcmicro-win-x64
+          path: |
+            build_output/BbcMicro.Emulator.exe
+            Acorn_BBC_Micro_Model_B_Reconstruction_Report.pdf
